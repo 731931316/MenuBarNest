@@ -1,0 +1,9 @@
+# Swift 编译缓存与本机构建目录。
+.build*/
+.swiftpm/
+
+# 构建脚本生成的应用安装包。
+dist/
+
+# macOS 文件夹显示设置。
+.DS_Store
