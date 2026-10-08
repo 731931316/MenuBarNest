@@ -41,14 +41,23 @@ struct MenuBarNestLauncher {
                 model.configurePreview()
                 try render(MainView(model: model), size: NSSize(width: 1060, height: 760),
                            to: directory.appendingPathComponent("management-preview.png"))
-                try render(OverflowView(model: model), size: NSSize(width: 430, height: 220),
-                           to: directory.appendingPathComponent("overflow-preview.png"))
+                // 展开示意采用独立静态参数，不改变真实控制器状态或调用软件菜单。
+                try render(InlinePreviewView(expanded: false), size: NSSize(width: 900, height: 220),
+                           to: directory.appendingPathComponent("inline-collapsed-preview.png"))
+                try render(InlinePreviewView(expanded: true), size: NSSize(width: 900, height: 220),
+                           to: directory.appendingPathComponent("inline-expanded-preview.png"))
+                // 辅助功能已授权而录屏未授权时，布局操作仍应可用。
+                model.screenRecordingGranted = false
+                model.statusMessage = "界面预览 · 示例图标 · 屏幕录制为可选原图预览。"
+                try render(MainView(model: model), size: NSSize(width: 1060, height: 760),
+                           to: directory.appendingPathComponent("management-optional-preview.png"))
                 // 单独验证最小窗口中的真实未授权状态，不将示例项目混入初始界面。
                 model.entries = []
                 model.accessibilityGranted = false
                 model.screenRecordingGranted = false
+                model.managementActive = false
                 model.layout.reset()
-                model.statusMessage = "请先完成权限授权，再刷新真实菜单栏图标。"
+                model.statusMessage = "请先允许辅助功能，再刷新真实菜单栏图标；屏幕录制仅用于可选原图预览。"
                 try render(MainView(model: model), size: NSSize(width: 940, height: 640),
                            to: directory.appendingPathComponent("management-permissions.png"))
                 print("Preview rendering completed.")

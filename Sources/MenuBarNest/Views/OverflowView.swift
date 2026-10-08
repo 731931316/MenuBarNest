@@ -1,119 +1,71 @@
-import NestCore
+import AppKit
 import SwiftUI
 
-/// 菜单栏下方的收纳面板，只展示用户设为“收起”的真实状态项。
-struct OverflowView: View {
-    /// 与管理窗口共享真实状态和系统操作能力。
-    @ObservedObject var model: NestCoordinator
+/// 仅供离屏渲染的同一行展开示意，使用明确标示的示例符号且不执行系统操作。
+struct InlinePreviewView: View {
+    /// 静态示意状态，与真实菜单栏控制器运行状态隔离。
+    let expanded: Bool
+    /// 展开示意中的收起项符号，不代表本机已安装软件。
+    private let collapsedSymbols = ["bubble.left.and.bubble.right.fill", "music.note", "icloud.fill"]
+    /// 两种示意中始终显示的符号，不与真实图标或点击目标关联。
+    private let visibleSymbols = ["calendar", "network"]
 
-    /// 面板使用完整收起列表，不受管理窗口的搜索词影响。
-    private var collapsedEntries: [MenuBarEntry] {
-        model.overflowItems()
-    }
-
-    /// 轻量面板显示图标、权限提示及管理入口。
+    /// 标明示例来源，并在同一菜单栏行中绘制展开和收起差异。
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Label("收起的图标", systemImage: "tray")
-                    .font(.subheadline.weight(.semibold))
-                Text("\(collapsedEntries.count)").font(.caption).foregroundStyle(.secondary)
+                Label(expanded ? "同一行展开示意" : "同一行收起示意", systemImage: "menubar.rectangle")
+                    .font(.headline)
                 Spacer()
-                Button { model.showManagementWindow() } label: {
-                    Image(systemName: "slider.horizontal.3")
-                }
-                .help("管理菜单栏图标")
-                Button { model.dismissOverflow() } label: {
-                    Image(systemName: "xmark")
-                }
-                .help("关闭收纳面板")
-            }
-            .buttonStyle(.plain)
-
-            if !model.screenRecordingGranted {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "info.circle")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("当前显示应用图标")
-                            .font(.caption.weight(.medium))
-                        Text("授权屏幕录制后可显示原始菜单栏图像。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("授权") { model.requestScreenRecording() }
-                        .font(.caption)
-                }
-                .padding(10)
-                .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-            }
-
-            if collapsedEntries.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray").font(.system(size: 26)).foregroundStyle(.tertiary)
-                    Text("还没有收起的图标").font(.callout)
-                    Button("打开管理窗口") { model.showManagementWindow() }
-                        .font(.caption)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
-            } else {
-                ScrollView(.horizontal) {
-                    HStack(alignment: .top, spacing: 8) {
-                        ForEach(collapsedEntries) { entry in
-                            overflowButton(entry)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .scrollIndicators(.hidden)
-            }
-
-            if let error = model.errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle")
+                Text("示例图标 · 不执行系统操作")
                     .font(.caption)
-                    .foregroundStyle(Color.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.quaternary, in: Capsule())
             }
-            if model.isBusy {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.mini)
-                    Text(model.statusMessage.isEmpty ? "正在打开原软件菜单…" : model.statusMessage)
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            } else if !collapsedEntries.isEmpty {
-                Text("点击打开原软件菜单 · 右键可选择辅助点击")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
+            menuBarRow
+            Text(expanded ? "收起的真实图标在系统菜单栏原位展开，展开后直接点击软件原菜单。" : "收起项暂时离开可见区域；点击顶部按钮可在同一行展开，始终隐藏项保持隐藏。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(16)
-        .frame(width: 430)
-        .background(.regularMaterial)
+        .padding(24)
+        // 静态示意与渲染入口保持同一尺寸，避免无限高度改变离屏窗口大小。
+        .frame(width: 900, height: 220, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    /// 图标点击经控制器恢复原状态项后调用其菜单，不创建仿制菜单。
-    private func overflowButton(_ entry: MenuBarEntry) -> some View {
-        Button { model.activateItem(entry, rightButton: false) } label: {
-            VStack(spacing: 7) {
-                EntryArtwork(entry: entry, size: 29)
-                    .frame(width: 44, height: 42)
-                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-                Text(entry.name)
-                    .font(.system(size: 10))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .frame(width: 62, height: 26, alignment: .top)
+    /// 所有符号保持一行，绘制的是静态示例而非仿制可点击的原生菜单。
+    private var menuBarRow: some View {
+        HStack(spacing: 18) {
+            Image(systemName: "apple.logo")
+            Text("示例应用").fontWeight(.semibold)
+            Text("文件")
+            Text("编辑")
+            Spacer(minLength: 18)
+            if expanded {
+                ForEach(collapsedSymbols, id: \.self) { symbol in
+                    Image(systemName: symbol)
+                        .foregroundStyle(Color.accentColor)
+                }
+                Divider().frame(height: 18)
             }
-            .contentShape(Rectangle())
+            ForEach(visibleSymbols, id: \.self) { symbol in
+                Image(systemName: symbol)
+            }
+            Image(systemName: expanded ? "chevron.right.circle" : "chevron.left.circle")
+                .foregroundStyle(Color.accentColor)
+            Image(systemName: "wifi")
+            Image(systemName: "battery.100")
+            Text("10:38").monospacedDigit()
         }
-        .buttonStyle(.plain)
-        .disabled(model.isBusy || !model.accessibilityGranted)
-        .help(model.accessibilityGranted ? "打开\(entry.name)的原菜单" : "请先允许辅助功能权限")
-        .contextMenu {
-            Button("打开原菜单") { model.activateItem(entry, rightButton: false) }
-            Button("使用右键打开") { model.activateItem(entry, rightButton: true) }
-        }
-        .accessibilityLabel("打开\(entry.name)")
+        .font(.system(size: 16))
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(expanded ? "示例菜单栏已在同一行展开收起图标" : "示例菜单栏已收起部分图标")
     }
 }

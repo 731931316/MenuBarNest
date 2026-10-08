@@ -7,7 +7,7 @@ enum SystemSelfCheck {
     /// 仅由显式自检参数指定的逐行 JSON 输出文件。
     private static var reportOutputURL: URL?
     /// 输出文件不可写时不能把自检视为完整通过。
-    private static var reportOutputFailed = false
+    static var reportOutputFailed = false
     /// 临时自建状态项及其恢复信息。
     @MainActor
     private struct Fixture {
@@ -40,6 +40,7 @@ enum SystemSelfCheck {
     /// 创建自建图标，依次验证扫描、截图、排序、隐藏与恢复，最终清理全部测试图标。
     static func run() async -> Bool {
         guard configureReportOutput() else { return false }
+        if CommandLine.arguments.contains("--inline-only") { return await runInline() }
         let system = MenuBarSystem()
         let pid = ProcessInfo.processInfo.processIdentifier
         let fixtures = createFixtures()
@@ -668,7 +669,7 @@ enum SystemSelfCheck {
     }
 
     /// 按阶段打印 JSON 的 PASS、FAIL 或 SKIP，避免未执行的检查被算作成功。
-    private static func report(_ check: String, status: String, detail: String, extra: [String: Any] = [:]) {
+    static func report(_ check: String, status: String, detail: String, extra: [String: Any] = [:]) {
         var payload = extra
         payload["check"] = check
         payload["status"] = status

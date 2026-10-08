@@ -58,7 +58,7 @@ final class LayoutStateTests: XCTestCase {
         let data = Data(#"{"placements":[{"id":"a","section":"hidden"},{"id":"a","section":"visible"}]}"#.utf8)
         let decoded = try JSONDecoder().decode(LayoutState.self, from: data)
         XCTAssertEqual(decoded.placements, [ItemPlacement(id: "a", section: .hidden)])
-        XCTAssertTrue(decoded.autoCollapse)
+        XCTAssertFalse(decoded.autoCollapse)
         XCTAssertEqual(decoded.collapseDelay, 8)
     }
 
@@ -86,11 +86,28 @@ final class LayoutStateTests: XCTestCase {
         XCTAssertEqual(decoded.placements, [ItemPlacement(id: "a", section: .collapsed)])
     }
 
+    /// 新配置及缺少自动收起字段的旧配置默认等待用户手动收起。
+    func testInlineCollapseDefaultsToManual() throws {
+        XCTAssertFalse(LayoutState().autoCollapse)
+        let decoded = try JSONDecoder().decode(LayoutState.self, from: Data(#"{"placements":[]}"#.utf8))
+        XCTAssertFalse(decoded.autoCollapse)
+    }
+
+    /// 旧配置中用户明确保存的自动收起开关继续保留，不被新默认值覆盖。
+    func testExplicitAutoCollapsePreferencesArePreserved() throws {
+        for enabled in [true, false] {
+            let data = Data("{\"placements\":[],\"autoCollapse\":\(enabled)}".utf8)
+            let decoded = try JSONDecoder().decode(LayoutState.self, from: data)
+            XCTAssertEqual(decoded.autoCollapse, enabled)
+        }
+    }
+
     /// 恢复默认值同时清空布局记录、自动收起设置及管理启用标记。
     func testResetRestoresDefaults() {
-        var layout = LayoutState(placements: [ItemPlacement(id: "a", section: .hidden)], autoCollapse: false, collapseDelay: 20, managementEnabled: true)
+        var layout = LayoutState(placements: [ItemPlacement(id: "a", section: .hidden)], autoCollapse: true, collapseDelay: 20, managementEnabled: true)
         layout.reset()
         XCTAssertEqual(layout, LayoutState())
         XCTAssertFalse(layout.managementEnabled)
+        XCTAssertFalse(layout.autoCollapse)
     }
 }

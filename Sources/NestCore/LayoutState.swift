@@ -1,13 +1,13 @@
 import Foundation
 import OSLog
 
-/// 菜单栏项目的显示分区，决定项目是否出现在顶部或展开面板中。
+/// 菜单栏项目的显示分区，决定同一行菜单栏收起及展开时是否显示。
 public enum VisibilitySection: String, Codable, CaseIterable, Identifiable {
     /// 始终留在系统菜单栏的项目。
     case visible
-    /// 从顶部收起、可在展开面板调用的项目。
+    /// 平时收起，展开时在菜单栏同一行显示的项目。
     case collapsed
-    /// 在顶部及普通展开面板中均不显示的项目。
+    /// 在菜单栏收起及展开状态中均不显示的项目。
     case hidden
 
     /// 供 SwiftUI 使用的稳定分区标识。
@@ -50,17 +50,17 @@ public struct ItemPlacement: Codable, Equatable {
 public struct LayoutState: Codable, Equatable {
     /// 全部已知项目的位置；每个标识最多出现一次。
     public var placements: [ItemPlacement]
-    /// 展开后是否在等待时间结束时自动收起。
+    /// 同一行展开后是否在等待时间结束时自动收起，默认由用户手动收起。
     public var autoCollapse: Bool
     /// 自动收起前的等待秒数。
     public var collapseDelay: Double
     /// 用户已确认启用管理，重启后可在权限允许时恢复收纳。
     public var managementEnabled: Bool
 
-    /// 创建布局并消除重复标识，保留第一次出现时的位置。
+    /// 创建默认手动收起的布局，消除重复标识并保留首次位置。
     public init(
         placements: [ItemPlacement] = [],
-        autoCollapse: Bool = true,
+        autoCollapse: Bool = false,
         collapseDelay: Double = 8,
         managementEnabled: Bool = false
     ) {
@@ -71,12 +71,12 @@ public struct LayoutState: Codable, Equatable {
         self.managementEnabled = managementEnabled
     }
 
-    /// 解码已保存的布局，旧配置缺少启用标记时不自动启用管理。
+    /// 解码既有设置；缺少自动收起字段时使用手动收起，缺少启用标记时不自动启用管理。
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             placements: try values.decode([ItemPlacement].self, forKey: .placements),
-            autoCollapse: try values.decodeIfPresent(Bool.self, forKey: .autoCollapse) ?? true,
+            autoCollapse: try values.decodeIfPresent(Bool.self, forKey: .autoCollapse) ?? false,
             collapseDelay: try values.decodeIfPresent(Double.self, forKey: .collapseDelay) ?? 8,
             managementEnabled: try values.decodeIfPresent(Bool.self, forKey: .managementEnabled) ?? false
         )

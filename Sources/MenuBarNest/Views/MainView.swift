@@ -159,11 +159,17 @@ struct MainView: View {
             }
             .help("重新扫描当前菜单栏图标")
             .disabled(model.isBusy)
+            Button { model.toggleInlineExpansion() } label: {
+                Label(model.inlineExpanded ? "收起图标" : "展开图标",
+                      systemImage: model.inlineExpanded ? "chevron.right" : "chevron.left")
+            }
+            .help(model.managementActive ? "在顶部菜单栏同一行\(model.inlineExpanded ? "收起" : "展开")图标" : "先应用布局，再展开收起的图标")
+            .disabled(!model.managementActive || model.isBusy)
             Button { model.applyLayout() } label: {
                 Label("应用布局", systemImage: "checkmark.circle.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!model.accessibilityGranted || !model.screenRecordingGranted || model.isBusy || model.entries.isEmpty)
+            .disabled(!model.accessibilityGranted || model.isBusy || model.entries.isEmpty)
         }
     }
 
@@ -172,10 +178,10 @@ struct MainView: View {
         if !model.accessibilityGranted || !model.screenRecordingGranted {
             HStack(alignment: .top, spacing: 12) {
                 if !model.accessibilityGranted {
-                    permissionCard(title: "允许管理图标", icon: "hand.point.up.left", detail: "辅助功能权限用于移动图标和打开原软件菜单。", action: { model.requestAccessibility() }, settings: { model.openPrivacySettings(accessibility: true) })
+                    permissionCard(title: "允许管理图标", icon: "hand.point.up.left", detail: "辅助功能权限用于排序、收起与展开菜单栏图标。", action: { model.requestAccessibility() }, settings: { model.openPrivacySettings(accessibility: true) })
                 }
                 if !model.screenRecordingGranted {
-                    permissionCard(title: "显示原始图标", icon: "rectangle.inset.filled", detail: "下拉原图标展示需要屏幕录制权限；授权后可应用收纳布局，未授权时仅显示应用图标。", action: { model.requestScreenRecording() }, settings: { model.openPrivacySettings(accessibility: false) })
+                    permissionCard(title: "原图预览（可选）", icon: "rectangle.inset.filled", detail: "仅用于管理窗口中的原始图标预览。同一行展开与排序无需录屏；未授权时显示应用图标。", action: { model.requestScreenRecording() }, settings: { model.openPrivacySettings(accessibility: false) })
                 }
             }
         }
@@ -358,8 +364,8 @@ struct MainView: View {
     private func sectionDetail(_ section: VisibilitySection) -> String {
         switch section {
         case .visible: return "保留在顶部菜单栏，随时可用。"
-        case .collapsed: return "点击收纳入口，在下方面板中打开。"
-        case .hidden: return "收纳面板中也不显示，可在这里恢复。"
+        case .collapsed: return "点击顶部按钮，在菜单栏同一行展开。"
+        case .hidden: return "顶部展开时也不显示，可在这里恢复。"
         }
     }
 

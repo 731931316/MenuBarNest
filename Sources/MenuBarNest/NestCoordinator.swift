@@ -4,7 +4,7 @@ import Combine
 import NestCore
 import SwiftUI
 
-/// 负责布局持久化、状态项分区、原生下拉面板与权限生命周期。
+/// 负责布局持久化、原生菜单栏同一行开合、状态项分区与权限生命周期。
 @MainActor
 final class NestCoordinator: NSObject, ObservableObject {
     /// 最近一次扫描到的真实状态项。
@@ -16,14 +16,16 @@ final class NestCoordinator: NSObject, ObservableObject {
     /// 获取状态项图像所需的屏幕录制权限状态。
     @Published var screenRecordingGranted = false
     /// 防止异步系统移动重入。
-    @Published var isBusy = false
+    @Published var isBusy = false { didSet { updateControlAppearance() } }
     /// 可供用户了解操作结果的状态文本。
     @Published var statusMessage = "请授权后刷新菜单栏图标。"
     /// 保存或系统操作失败的明确说明。
     @Published var errorMessage: String?
     /// 表示真实菜单栏已按规则完成分区。
-    @Published var managementActive = false
-    /// 当前实际应用的布局；尚未应用的编辑不改变下拉面板。
+    @Published var managementActive = false { didSet { updateControlAppearance() } }
+    /// 经实时窗口证据确认的同一行展开状态，忙碌期间保留最后成功状态。
+    @Published private(set) var inlineExpanded = false { didSet { updateControlAppearance() } }
+    /// 当前实际应用的布局；尚未应用的编辑不改变真实菜单栏分区。
     @Published private(set) var appliedLayout: LayoutState?
     /// 管理窗口搜索文本。
     @Published var query = ""
@@ -32,6 +34,8 @@ final class NestCoordinator: NSObject, ObservableObject {
 
     /// 系统交互适配器，便于替换为测试实现。
     private let system: any MenuBarSystemManaging
+    /// 同一行开合的匿名测试观察点，生产运行使用真实权限及自有状态项。
+    private let inlineEnvironment: InlineMenuBarEnvironment?
     /// 本地配置仓库。
     private let repository: LayoutRepository
     /// 配置读取损坏时阻止后续静默覆盖。
@@ -42,16 +46,12 @@ final class NestCoordinator: NSObject, ObservableObject {
     private var collapsedBoundary: NSStatusItem?
     /// 收起区与始终隐藏区之间的收纳分隔项。
     private var hiddenBoundary: NSStatusItem?
-    /// 原生下拉面板。
-    private let popover = NSPopover()
     /// 设置窗口。
     private var managementWindow: NSWindow?
     /// 用于权限刷新及退出应用项目检测的计时器。
     private var pollTimer: Timer?
-    /// 点击原始菜单后检查是否可以安全重新收纳。
+    /// 同一行展开后检查是否可以安全自动收起。
     private var rehideTimer: Timer?
-    /// 临时展开的原图标，避免在用户菜单仍打开时重新隐藏。
-    private var temporarilyRevealed = false
     /// 首次应用前的项目顺序，用于本次会话恢复。
     private var originalOrder: [String] = []
     /// 屏幕参数变化通知。
@@ -68,8 +68,10 @@ final class NestCoordinator: NSObject, ObservableObject {
     private var pendingLaunchRestore = true
 
     /// 创建本地配置仓库，预览使用独立临时文件且不启动系统控制。
-    init(system: (any MenuBarSystemManaging)? = nil, preview: Bool = false) {
+    init(system: (any MenuBarSystemManaging)? = nil, preview: Bool = false,
+         inlineEnvironment: InlineMenuBarEnvironment? = nil) {
         self.system = system ?? MenuBarSystem()
+        self.inlineEnvironment = inlineEnvironment
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let configURL = preview
             ? FileManager.default.temporaryDirectory.appendingPathComponent("MenuBarNest-Preview/config.json")
@@ -121,13 +123,6 @@ final class NestCoordinator: NSObject, ObservableObject {
         }
     }
 
-    /// 下拉面板使用已应用布局，不受搜索或待应用编辑影响。
-    func overflowItems() -> [MenuBarEntry] {
-        guard let appliedLayout else { return [] }
-        let ids = appliedLayout.orderedIDs(in: .collapsed, among: entries.map(\.id))
-        return ids.compactMap { id in entries.first { $0.id == id } }
-    }
-
     /// 刷新权限及真实状态项，保留离线应用的既有规则。
     func refresh() {
         guard !isBusy, !terminating else { return }
@@ -146,7 +141,7 @@ final class NestCoordinator: NSObject, ObservableObject {
             isBusy = false
             if pendingLaunchRestore {
                 pendingLaunchRestore = false
-                if layout.managementEnabled && screenRecordingGranted && !entries.isEmpty { applyLayout() }
+                if layout.managementEnabled && !entries.isEmpty { applyLayout() }
             }
         }
     }
@@ -159,7 +154,7 @@ final class NestCoordinator: NSObject, ObservableObject {
         if !accessibilityGranted { openPrivacySettings(accessibility: true) }
     }
 
-    /// 请求录屏权限，只用于局部状态项图像。
+    /// 请求可选录屏权限，只用于管理窗口内的局部原图预览。
     func requestScreenRecording() {
         _ = CGRequestScreenCaptureAccess()
         updatePermissions()
@@ -197,13 +192,9 @@ final class NestCoordinator: NSObject, ObservableObject {
             errorMessage = MenuBarOperationError.accessibilityRequired.localizedDescription
             return
         }
-        guard screenRecordingGranted else {
-            errorMessage = "下拉面板需要屏幕录制权限来显示原图标。请授权后再应用布局。"
-            return
-        }
         isBusy = true
         errorMessage = nil
-        dismissOverflow()
+        rehideTimer?.invalidate()
         operationTask = Task {
             setBoundaries(collapsed: false, hidden: false)
             await pause(180)
@@ -214,25 +205,26 @@ final class NestCoordinator: NSObject, ObservableObject {
                 try await arrangeSections()
                 try Task.checkCancellation()
                 updatePermissions()
-                guard accessibilityGranted && screenRecordingGranted else {
+                guard accessibilityGranted else {
                     throw MenuBarOperationError.unsupported("管理权限已撤销，所有图标保持展开。")
                 }
                 // 只有已确认正确顺序后，才扩大分隔项宽度隐藏指定分区。
                 setBoundaries(collapsed: true, hidden: true)
-                try await verifyAppliedVisibility()
+                entries = try await verifyInlineVisibility(expanded: false, expected: entries, applied: layout)
                 try Task.checkCancellation()
                 managementActive = true
                 layout.managementEnabled = true
                 appliedLayout = layout
-                temporarilyRevealed = false
+                inlineExpanded = false
                 statusMessage = saveLayout()
-                    ? "布局已应用。点击顶部“更多”查看收起的图标。"
+                    ? "布局已应用。点击顶部箭头，在菜单栏同一行展开或收起图标。"
                     : "布局已应用，但设置保存失败；重新启动后可能无法恢复。"
                 NestLog.app.info("菜单栏布局应用成功。")
             } catch {
                 setBoundaries(collapsed: false, hidden: false)
                 managementActive = false
                 appliedLayout = nil
+                inlineExpanded = false
                 if !(error is CancellationError) {
                     errorMessage = error.localizedDescription
                     statusMessage = "布局未完整应用，已展开所有分区。"
@@ -243,14 +235,12 @@ final class NestCoordinator: NSObject, ObservableObject {
         }
     }
 
-    /// 面板中的图像不替代原控件；临时恢复后调用真实软件菜单。
+    /// 显式定位请求先恢复真实图标，再按逻辑身份调用原软件菜单。
     func activateItem(_ entry: MenuBarEntry, rightButton: Bool = false) {
         guard !isBusy, !terminating, accessibilityGranted else { return }
-        dismissOverflow()
         isBusy = true
         operationTask = Task {
             setBoundaries(collapsed: false, hidden: true)
-            temporarilyRevealed = true
             await pause(180)
             let live = system.scan(excludingPID: getpid()).first {
                 $0.processIdentifier == entry.processIdentifier && $0.id == entry.id
@@ -258,8 +248,12 @@ final class NestCoordinator: NSObject, ObservableObject {
             do {
                 try Task.checkCancellation()
                 guard let live else { throw MenuBarOperationError.itemUnavailable }
+                if managementActive, let appliedLayout {
+                    entries = try await verifyInlineVisibility(expanded: true, expected: entries, applied: appliedLayout)
+                    inlineExpanded = true
+                }
                 try await system.click(live, rightButton: rightButton)
-                statusMessage = "已调用原软件图标。使用完后可点击“更多”重新收纳。"
+                statusMessage = "已调用原软件图标。使用完后可点击顶部箭头收起。"
                 scheduleRehide()
             } catch {
                 if !(error is CancellationError) {
@@ -267,6 +261,71 @@ final class NestCoordinator: NSObject, ObservableObject {
                     statusMessage = "图标未能打开，已保留原位显示以便手动操作。"
                 }
                 NestLog.system.warning("原始状态项点击失败，保留可见状态。")
+            }
+            isBusy = false
+        }
+    }
+
+    /// 只改变原生分隔项长度；实时确认成功后才切换开合状态，连续点击不重入。
+    func toggleInlineExpansion() {
+        guard !isBusy, !terminating else { return }
+        guard managementActive, let appliedLayout else {
+            statusMessage = "请先在管理窗口应用布局，再使用顶部箭头展开图标。"
+            return
+        }
+        updatePermissions()
+        guard accessibilityGranted else {
+            suspendManagement(message: "辅助功能权限已撤销，已暂停管理并展开所有分区。")
+            return
+        }
+        let previousExpanded = inlineExpanded
+        let requestedExpanded = !previousExpanded
+        let expected = entries
+        isBusy = true
+        errorMessage = nil
+        rehideTimer?.invalidate()
+        operationTask = Task {
+            // 普通开合只切换收起区，始终隐藏边界在两种状态下均保持收纳。
+            setBoundaries(collapsed: !requestedExpanded, hidden: true)
+            do {
+                entries = try await verifyInlineVisibility(expanded: requestedExpanded, expected: expected, applied: appliedLayout)
+                try Task.checkCancellation()
+                inlineExpanded = requestedExpanded
+                statusMessage = requestedExpanded
+                    ? "收起区已在菜单栏同一行展开，再次点击顶部箭头收起。"
+                    : "收起区已收起，常显区继续显示。"
+                if requestedExpanded { scheduleRehide() }
+                NestLog.app.info("原生菜单栏开合已确认，展开状态 \(requestedExpanded, privacy: .public)。")
+            } catch {
+                // 生命周期取消由退出或权限处理恢复；不得让旧任务重新扩大分隔项。
+                guard !(error is CancellationError), !Task.isCancelled, !terminating else {
+                    isBusy = false
+                    return
+                }
+                updatePermissions()
+                guard accessibilityGranted, managementActive else {
+                    suspendManagement(message: "管理状态已变化，已展开所有分区。")
+                    isBusy = false
+                    return
+                }
+                let failureMessage = error.localizedDescription
+                setBoundaries(collapsed: !previousExpanded, hidden: true)
+                do {
+                    entries = try await verifyInlineVisibility(expanded: previousExpanded, expected: expected, applied: appliedLayout)
+                    inlineExpanded = previousExpanded
+                    errorMessage = failureMessage
+                    statusMessage = previousExpanded ? "开合未完成，已保留展开状态。" : "开合未完成，已恢复收起状态。"
+                    if previousExpanded { scheduleRehide() }
+                    NestLog.system.warning("菜单栏开合未确认，已恢复上一次成功状态。")
+                } catch {
+                    guard !(error is CancellationError), !Task.isCancelled, !terminating else {
+                        isBusy = false
+                        return
+                    }
+                    suspendManagement(message: "系统未确认恢复状态，已暂停管理并展开所有分区。")
+                    errorMessage = failureMessage
+                    NestLog.system.error("开合与状态恢复均未确认，已取消收纳。")
+                }
             }
             isBusy = false
         }
@@ -305,20 +364,19 @@ final class NestCoordinator: NSObject, ObservableObject {
         managementWindow?.makeKeyAndOrderFront(nil)
     }
 
-    /// 关闭下拉面板。
-    func dismissOverflow() { popover.close() }
-
     /// 修改自动重新收纳开关。
     func setAutoCollapse(_ enabled: Bool) {
         layout.autoCollapse = enabled
         saveLayout()
         if !enabled { rehideTimer?.invalidate() }
+        else if inlineExpanded { scheduleRehide() }
     }
 
     /// 限制自动收纳延迟到安全范围，避免立即打断菜单操作。
     func setCollapseDelay(_ delay: Double) {
         layout.collapseDelay = max(3, min(60, delay))
         saveLayout()
+        if inlineExpanded { scheduleRehide() }
     }
 
     /// 在退出前撤销收纳并尽量恢复原顺序，随后让 AppKit 完成退出。
@@ -361,42 +419,49 @@ final class NestCoordinator: NSObject, ObservableObject {
 
     /// 安装三个自有状态项，分隔项宽度决定左侧分区是否可见。
     private func installControls() {
-        hiddenBoundary = makeBoundary(name: "HiddenBoundary", symbol: "eye.slash")
-        collapsedBoundary = makeBoundary(name: "CollapsedBoundary", symbol: "chevron.left")
+        hiddenBoundary = makeBoundary(name: "HiddenBoundary")
+        collapsedBoundary = makeBoundary(name: "CollapsedBoundary")
         moreItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         moreItem?.autosaveName = "MenuBarNest.More"
         if let button = moreItem?.button {
-            button.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "更多菜单栏图标")
-            button.image?.isTemplate = true
-            button.toolTip = "菜单栏收纳：点击展开，右键管理"
             button.target = self
             button.action = #selector(moreClicked)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        popover.behavior = .transient
-        popover.animates = true
-        popover.contentSize = NSSize(width: 430, height: 180)
-        popover.contentViewController = NSHostingController(rootView: OverflowView(model: self))
+        updateControlAppearance()
     }
 
-    /// 创建分隔项；未启用管理时仍保持细窄以便安全拖动。
-    private func makeBoundary(name: String, symbol: String) -> NSStatusItem {
-        let item = NSStatusBar.system.statusItem(withLength: 18)
+    /// 按已确认状态更新唯一可见控制按钮，系统操作期间禁止再次触发。
+    private func updateControlAppearance() {
+        guard let button = moreItem?.button else { return }
+        let symbol = managementActive ? (inlineExpanded ? "chevron.right" : "chevron.left") : "slider.horizontal.3"
+        let action = managementActive ? (inlineExpanded ? "收起图标" : "展开图标") : "管理菜单栏图标"
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: action)
+        button.image?.isTemplate = true
+        button.toolTip = "\(action) · 右键打开管理菜单"
+        button.isEnabled = !isBusy && !terminating
+    }
+
+    /// 创建透明细分隔项，只由唯一入口控制，不额外显示边界按钮。
+    private func makeBoundary(name: String) -> NSStatusItem {
+        let item = NSStatusBar.system.statusItem(withLength: 1)
         item.autosaveName = "MenuBarNest.\(name)"
-        item.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "收纳分区边界")
-        item.button?.image?.isTemplate = true
         item.button?.toolTip = "分区边界，由菜单栏收纳自动管理"
         return item
     }
 
     /// 使用大于所有屏幕宽度的分隔项把左侧图标挤出可见区域。
     private func setBoundaries(collapsed: Bool, hidden: Bool) {
+        if let inlineEnvironment {
+            inlineEnvironment.updateBoundaries(collapsed, hidden)
+            return
+        }
         let screenWidth = NSScreen.screens.reduce(CGFloat(0)) { $0 + $1.frame.width }
         let expanded = max(10000, screenWidth * 2)
-        collapsedBoundary?.length = collapsed ? expanded : 18
-        hiddenBoundary?.length = hidden ? expanded : 18
-        collapsedBoundary?.button?.image = collapsed ? nil : NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "收起区边界")
-        hiddenBoundary?.button?.image = hidden ? nil : NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "隐藏区边界")
+        collapsedBoundary?.length = collapsed ? expanded : 1
+        hiddenBoundary?.length = hidden ? expanded : 1
+        collapsedBoundary?.button?.image = nil
+        hiddenBoundary?.button?.image = nil
     }
 
     /// 按“隐藏、隐藏边界、收起、收起边界、常显、更多”的物理顺序排列。
@@ -434,7 +499,7 @@ final class NestCoordinator: NSObject, ObservableObject {
         guard leftBoundary < rightBoundary && rightBoundary < moreX else { throw MenuBarOperationError.movementFailed }
         // 系统保护项若被分隔项挤到左侧，拒绝收纳，防止间接隐藏不可管理项。
         guard entries.filter({ !$0.canMove }).allSatisfy({ $0.frame.midX > rightBoundary }) else {
-            throw MenuBarOperationError.unsupported("有系统固定图标位于收纳边界左侧，已保持全部展开。请调整顶部“更多”入口位置后重试。")
+            throw MenuBarOperationError.unsupported("有系统固定图标位于收纳边界左侧，已保持全部展开。请调整顶部入口位置后重试。")
         }
         for entry in entries where entry.canMove {
             let x = entry.frame.midX
@@ -470,54 +535,76 @@ final class NestCoordinator: NSObject, ObservableObject {
         return MenuBarEntry(id: "own-\(item.autosaveName ?? "control")", name: "管理器控制项",
                             bundleIdentifier: Bundle.main.bundleIdentifier ?? "local.MenuBarNest",
                             processIdentifier: getpid(), windowID: CGWindowID(window.windowNumber),
-                            frame: frame, image: nil, canMove: true, limitation: nil)
+                            frame: frame, image: nil, canMove: true, limitation: nil,
+                            isOnScreen: record[kCGWindowIsOnscreen as String] as? Bool)
     }
 
-    /// 连续确认真实窗口可见性；系统未完成收纳时展开所有分区并报告失败。
-    private func verifyAppliedVisibility() async throws {
-        let expectedEntries = entries
+    /// 连续确认入口所在菜单栏行的真实状态，不把副屏副本或未知窗口当作成功。
+    private func verifyInlineVisibility(expanded: Bool, expected: [MenuBarEntry], applied: LayoutState) async throws -> [MenuBarEntry] {
         var stableMatches = 0
+        var lastResult = InlineVisibilityPolicy.VerificationResult.unresolved
+        let previousImages = Dictionary(entries.map { ($0.id, $0.image) }, uniquingKeysWith: { first, _ in first })
         for _ in 0..<20 {
             try await Task.sleep(for: .milliseconds(50))
             try Task.checkCancellation()
-            guard AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() else {
+            updatePermissions()
+            guard accessibilityGranted else {
                 throw MenuBarOperationError.unsupported("管理权限已撤销，所有图标保持展开。")
             }
-            // 由系统适配层观察当前逻辑项，不把旧 CG 编号或副本重新解释为真实图标。
-            let currentEntries = system.scan(excludingPID: getpid())
-            let displays = NSScreen.screens.compactMap { screen -> CGRect? in
-                guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-                let bounds = CGDisplayBounds(number.uint32Value)
-                guard !bounds.isEmpty, !bounds.isNull else { return nil }
-                return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: NSStatusBar.system.thickness)
-            }
-            // 逻辑身份与所属进程必须一致；仅缓存身份而无实时窗口证据不能算验证成功。
-            let matches = expectedEntries.allSatisfy { entry in
-                guard let current = currentEntries.first(where: {
-                    $0.id == entry.id && $0.processIdentifier == entry.processIdentifier
-                }), current.windowID != kCGNullWindowID, let onScreen = current.isOnScreen else { return false }
-                let frame = current.frame
-                let intersectsBar = displays.contains {
-                    let intersection = $0.intersection(frame)
-                    return !intersection.isNull && intersection.width > 1 && intersection.height > 1
-                }
-                if entry.canMove && layout.section(for: entry.id) != .visible {
-                    return !onScreen || !intersectsBar
-                }
-                // 常显项必须完整处于菜单栏宽度内，防止把被挤出屏幕当成正常显示。
-                return onScreen && displays.contains {
-                    $0.minX - 1 <= frame.minX && frame.maxX <= $0.maxX + 1 &&
-                    abs($0.midY - frame.midY) <= 6
-                }
-            }
-            stableMatches = matches ? stableMatches + 1 : 0
+            // 每次按逻辑身份和进程匹配，新旧窗口编号变化不等同于图标增减。
+            var currentEntries = system.scan(excludingPID: getpid())
+            lastResult = inlineVisibilityResult(current: currentEntries, expected: expected, applied: applied, expanded: expanded)
+            stableMatches = lastResult == .confirmed ? stableMatches + 1 : 0
             if stableMatches >= 3 {
-                NestLog.system.debug("常显及收纳分区的实际可见性已确认。")
-                return
+                for index in currentEntries.indices {
+                    currentEntries[index].image = screenRecordingGranted ? previousImages[currentEntries[index].id] ?? nil : nil
+                }
+                NestLog.system.debug("入口及各分区的同一行可见状态已连续确认。")
+                return currentEntries
             }
         }
-        NestLog.system.warning("分区实际可见性未达到预期，取消收纳。")
-        throw MenuBarOperationError.unsupported("系统未确认各分区的显示状态，已保持展开。请减少常显图标或调整入口位置后重试。")
+        NestLog.system.warning("系统未确认所请求的同一行可见状态。")
+        throw MenuBarOperationError.unsupported(lastResult == .insufficientSpace
+            ? "菜单栏空间不足，无法完整显示所需图标和入口。请减少展开图标或切换菜单较短的应用后重试。"
+            : "系统未确认各分区的显示状态，请确认菜单栏可见后刷新并重新应用布局。")
+    }
+
+    /// 把同一逻辑项的实时窗口证据交给纯规则校验，不使用历史可见性补齐缺失值。
+    private func inlineVisibilityResult(current: [MenuBarEntry], expected: [MenuBarEntry], applied: LayoutState,
+                                        expanded: Bool) -> InlineVisibilityPolicy.VerificationResult {
+        let currentByID = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let currentIDs = Set(current.map(\.id))
+        let mappingConfirmed = currentIDs.count == current.count && currentIDs == Set(expected.map(\.id)) && expected.allSatisfy { old in
+            guard let entry = currentByID[old.id] else { return false }
+            return entry.processIdentifier == old.processIdentifier && entry.windowID != kCGNullWindowID && entry.isOnScreen != nil
+        }
+        guard mappingConfirmed, let control = currentControllerEntry(), control.windowID != kCGNullWindowID,
+              let controlOnScreen = control.isOnScreen else { return .unresolved }
+        guard controlOnScreen else { return .insufficientSpace }
+        let observed = current.map {
+            InlineVisibilityPolicy.ObservedItem(id: $0.id, onScreen: $0.isOnScreen, frame: $0.frame,
+                section: applied.section(for: $0.id), canMove: $0.canMove)
+        }
+        return InlineVisibilityPolicy.verify(items: observed, menuBarStrips: currentMenuBarStrips(),
+            controllerFrame: control.frame, isExpanded: expanded)
+    }
+
+    /// 读取控制入口的真实原始窗口，测试时仅返回合成观察。
+    private func currentControllerEntry() -> MenuBarEntry? {
+        if let inlineEnvironment { return inlineEnvironment.controller() }
+        guard let moreItem else { return nil }
+        return try? ownEntry(for: moreItem)
+    }
+
+    /// 获取各显示器当前的菜单栏几何，不缓存旧分辨率或旧显示器排列。
+    private func currentMenuBarStrips() -> [CGRect] {
+        if let inlineEnvironment { return inlineEnvironment.menuBarStrips() }
+        return NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            let bounds = CGDisplayBounds(number.uint32Value)
+            guard !bounds.isEmpty, !bounds.isNull else { return nil }
+            return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: NSStatusBar.system.thickness)
+        }
     }
 
     /// 扫描时复用已采集图像；未授予录屏权限不调用截图 API。
@@ -531,6 +618,11 @@ final class NestCoordinator: NSObject, ObservableObject {
             }
         }
         guard !Task.isCancelled else { return }
+        updatePermissions()
+        if !screenRecordingGranted {
+            // 可选录屏中途撤销时不沿用缓存原图，界面改用应用图标。
+            for index in fresh.indices { fresh[index].image = nil }
+        }
         entries = fresh
         layout.reconcile(discoveredIDs: fresh.map(\.id))
         NestLog.system.debug("状态项扫描完成，数量 \(fresh.count, privacy: .public)。")
@@ -552,57 +644,80 @@ final class NestCoordinator: NSObject, ObservableObject {
 
     /// 定时检查授权撤销；发现撤销立即取消收纳，避免图标不可访问。
     private func poll() {
+        let previouslyRecorded = screenRecordingGranted
         updatePermissions()
-        if !(accessibilityGranted && screenRecordingGranted) && (managementActive || isBusy) {
-            operationTask?.cancel()
-            setBoundaries(collapsed: false, hidden: false)
-            managementActive = false
-            appliedLayout = nil
-            statusMessage = "权限已撤销，已暂停收纳并恢复图标显示。"
-            NestLog.system.warning("管理权限撤销，已暂停收纳。")
+        if previouslyRecorded && !screenRecordingGranted {
+            // 录屏仅影响原图预览，撤销后清除图像而不停止原生同一行开合。
+            for index in entries.indices { entries[index].image = nil }
+            NestLog.app.info("可选原图预览权限已撤销，同一行管理继续运行。")
+        }
+        if !accessibilityGranted && (managementActive || isBusy) {
+            suspendManagement(message: "辅助功能权限已撤销，已暂停收纳并恢复图标显示。")
+            NestLog.system.warning("辅助功能权限撤销，已暂停收纳。")
         }
         guard accessibilityGranted, !isBusy, !terminating else { return }
         let live = system.scan(excludingPID: getpid())
         // 新项目可能落在宽分隔项左侧，项目增减时先展开，防止入口不可访问。
         let currentIDs = Set(entries.map(\.id))
-        if Set(live.map(\.id)) != currentIDs {
-            setBoundaries(collapsed: false, hidden: false)
-            managementActive = false
-            appliedLayout = nil
-            temporarilyRevealed = false
-            rehideTimer?.invalidate()
+        let oldProcesses = Dictionary(entries.map { ($0.id, $0.processIdentifier) }, uniquingKeysWith: { first, _ in first })
+        if Set(live.map(\.id)) != currentIDs || live.contains(where: { oldProcesses[$0.id] != $0.processIdentifier }) {
+            suspendManagement(message: "菜单栏项目已变化，分区已展开；请刷新并重新应用布局。")
             layout.reconcile(discoveredIDs: live.map(\.id))
-            statusMessage = "菜单栏项目已变化，分区已展开；请刷新并重新应用布局。"
             NestLog.system.info("状态项清单变化，已展开分区等待重新应用。")
         }
         // 窗口映射变化不代表新增图标；每次观察都更新位置，并沿用同一逻辑项的图像。
         let images = Dictionary(entries.map { ($0.id, $0.image) }, uniquingKeysWith: { first, _ in first })
+        if managementActive, let appliedLayout,
+           inlineVisibilityResult(current: live, expected: entries, applied: appliedLayout, expanded: inlineExpanded) == .insufficientSpace {
+            // 长应用菜单挤出展开组时，等原菜单关闭再退回较窄的收起态。
+            if inlineExpanded, !menuInteractionActive() {
+                toggleInlineExpansion()
+            } else {
+                errorMessage = "当前菜单栏空间不足，请减少常显图标或切换菜单较短的应用。"
+            }
+        }
         entries = live.map { entry in var entry = entry; entry.image = images[entry.id] ?? nil; return entry }
     }
 
     /// 屏幕变化后展开分区，并要求按新布局重新确认应用。
     private func screenConfigurationChanged() {
+        suspendManagement(message: "屏幕布局已变化，图标已展开；请重新应用布局。")
+        NestLog.system.info("屏幕参数变化，已暂停收纳。")
+    }
+
+    /// 权限撤销、显示器变化或恢复失败时取消任务并安全撤销分隔项。
+    private func suspendManagement(message: String) {
         operationTask?.cancel()
+        rehideTimer?.invalidate()
         setBoundaries(collapsed: false, hidden: false)
         managementActive = false
         appliedLayout = nil
-        statusMessage = "屏幕布局已变化，图标已展开；请重新应用布局。"
-        NestLog.system.info("屏幕参数变化，已暂停收纳。")
+        inlineExpanded = false
+        statusMessage = message
+        NestLog.app.warning("菜单栏管理已暂停，自有分隔项已撤销。")
     }
 
     /// 刷新系统权限，不自动发起新的授权请求。
     private func updatePermissions() {
+        if let inlineEnvironment {
+            let permissions = inlineEnvironment.permissions()
+            accessibilityGranted = permissions.accessibility
+            screenRecordingGranted = permissions.screenRecording
+            return
+        }
         accessibilityGranted = AXIsProcessTrusted()
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
     }
 
-    /// 根据点击类型打开面板或管理菜单。
+    /// 左键切换原生同一行开合，右键打开管理菜单。
     @objc private func moreClicked() {
         guard let button = moreItem?.button else { return }
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
+            menu.autoenablesItems = false
             menu.addItem(withTitle: "管理菜单栏图标…", action: #selector(openManagement), keyEquivalent: "")
-            menu.addItem(withTitle: "重新收起图标", action: #selector(collapseNow), keyEquivalent: "")
+            let toggleItem = menu.addItem(withTitle: inlineExpanded ? "收起图标" : "展开图标", action: #selector(toggleClicked), keyEquivalent: "")
+            toggleItem.isEnabled = managementActive && !isBusy
             menu.addItem(.separator())
             menu.addItem(withTitle: "恢复全部图标", action: #selector(restoreClicked), keyEquivalent: "")
             menu.addItem(withTitle: "退出菜单栏收纳", action: #selector(quitClicked), keyEquivalent: "")
@@ -610,9 +725,8 @@ final class NestCoordinator: NSObject, ObservableObject {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button)
             return
         }
-        if temporarilyRevealed { collapseNow() }
-        if popover.isShown { dismissOverflow() }
-        else { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+        if managementActive { toggleInlineExpansion() }
+        else { showManagementWindow() }
     }
 
     /// 菜单动作：显示管理窗口。
@@ -621,13 +735,12 @@ final class NestCoordinator: NSObject, ObservableObject {
     @objc private func restoreClicked() { restoreAll() }
     /// 菜单动作：触发受控退出。
     @objc private func quitClicked() { NSApp.terminate(nil) }
-    /// 明确用户点击后立即重新收纳。
+    /// 管理菜单调用与左键一致的验证开合流程。
+    @objc private func toggleClicked() { toggleInlineExpansion() }
+    /// 自动收纳只请求关闭已展开状态，不在菜单操作期间切换。
     @objc private func collapseNow() {
-        guard managementActive else { return }
-        setBoundaries(collapsed: true, hidden: true)
-        temporarilyRevealed = false
-        rehideTimer?.invalidate()
-        statusMessage = "收起区已重新收纳。"
+        guard managementActive, inlineExpanded, !isBusy, !menuInteractionActive() else { return }
+        toggleInlineExpansion()
     }
     /// 收到原软件菜单跟踪结束通知，允许重新收纳。
     @objc private func menuTrackingEnded() { menuTracking = false }
@@ -638,11 +751,17 @@ final class NestCoordinator: NSObject, ObservableObject {
         guard layout.autoCollapse else { return }
         rehideTimer = Timer.scheduledTimer(withTimeInterval: layout.collapseDelay, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.managementActive, self.temporarilyRevealed else { return }
-                guard !self.menuTracking, NSEvent.pressedMouseButtons == 0, !self.hasVisibleMenuWindow() else { return }
+                guard let self, self.managementActive, self.inlineExpanded, !self.isBusy else { return }
+                guard !self.menuInteractionActive() else { return }
                 self.collapseNow()
             }
         }
+    }
+
+    /// 菜单跟踪和鼠标按下期间推迟自动收起，未知窗口清单也保守等待。
+    private func menuInteractionActive() -> Bool {
+        if let inlineEnvironment { return inlineEnvironment.menuInteractionActive() }
+        return menuTracking || NSEvent.pressedMouseButtons != 0 || hasVisibleMenuWindow()
     }
 
     /// 使用窗口层级保守判断是否仍有系统弹出菜单，避免打断选择。
@@ -650,8 +769,7 @@ final class NestCoordinator: NSObject, ObservableObject {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return true }
         return windows.contains { window in
             let level = window[kCGWindowLayer as String] as? Int ?? 0
-            let owner = window[kCGWindowOwnerPID as String] as? Int32 ?? 0
-            return owner != getpid() && level == Int(CGWindowLevelForKey(.popUpMenuWindow))
+            return level == Int(CGWindowLevelForKey(.popUpMenuWindow))
         }
     }
 
@@ -660,7 +778,7 @@ final class NestCoordinator: NSObject, ObservableObject {
         setBoundaries(collapsed: false, hidden: false)
         managementActive = false
         appliedLayout = nil
-        temporarilyRevealed = false
+        inlineExpanded = false
         rehideTimer?.invalidate()
         await pause(120)
         guard !Task.isCancelled else { return false }
